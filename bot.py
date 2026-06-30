@@ -624,53 +624,79 @@ async def promote(interaction: discord.Interaction, user: discord.Member = None)
     carries = await count_marked_messages(CARRY_LOG_CHANNEL_ID, target.id, discord.Color.orange())
     support_vouches = await count_marked_messages(VOUCH_CHANNEL_ID, target.id, discord.Color.gold())
 
+    async def evaluate_ladder(ladder, value1, value2, label1, label2, track_label, emoji):
+        """Finds the highest tier the user qualifies for, promotes them if it's new,
+        and returns (promotion_message_or_None, progress_message)."""
+        ladder_role_ids = {role_id for role_id, _, _, _ in ladder}
+        current_role_ids = {r.id for r in target.roles if r.id in ladder_role_ids}
+
+        qualifying_index = 0
+        for i, (role_id, role_name, req1, req2) in enumerate(ladder):
+            if value1 >= req1 and value2 >= req2:
+                qualifying_index = i
+                break
+
+        role_id, role_name, req1, req2 = ladder[qualifying_index]
+
+        promotion_message = None
+        if role_id not in current_role_ids:
+            new_role = guild.get_role(role_id)
+            if new_role:
+                roles_to_remove = [guild.get_role(rid) for rid in current_role_ids if rid != role_id]
+                roles_to_remove = [r for r in roles_to_remove if r]
+                if roles_to_remove:
+                    await target.remove_roles(*roles_to_remove, reason=f"{track_label} promotion")
+                await target.add_roles(new_role, reason=f"{track_label} promotion via /promote")
+                promotion_message = f"{emoji} Promoted to **{role_name}** ({track_label} track)"
+
+        # Progress toward the next tier up (the entry just before this one in the list)
+        if qualifying_index == 0:
+            progress_message = f"{emoji} {track_label}: already at the top rank (**{role_name}**)."
+        else:
+            _, next_name, next_req1, next_req2 = ladder[qualifying_index - 1]
+            progress_message = (
+                f"{emoji} {track_label}: next rank is **{next_name}** — "
+                f"{label1}: {value1}/{next_req1}, {label2}: {value2}/{next_req2}"
+            )
+
+        return promotion_message, progress_message
+
     results = []
+    progress_lines = []
 
     # ----- Carrier track: only applies if they already have the base Carrier role -----
     carrier_role = guild.get_role(CARRIER_ROLE_ID)
     if carrier_role and carrier_role in target.roles:
-        ladder_role_ids = {role_id for role_id, _, _, _ in CARRIER_LADDER}
-        current_role_ids = {r.id for r in target.roles if r.id in ladder_role_ids}
-
-        # Find the highest tier they qualify for (list is ordered highest -> lowest)
-        for role_id, role_name, carries_req, vouches_req in CARRIER_LADDER:
-            if carries >= carries_req and vouches >= vouches_req:
-                if role_id not in current_role_ids:
-                    new_role = guild.get_role(role_id)
-                    if new_role:
-                        roles_to_remove = [guild.get_role(rid) for rid in current_role_ids if rid != role_id]
-                        roles_to_remove = [r for r in roles_to_remove if r]
-                        if roles_to_remove:
-                            await target.remove_roles(*roles_to_remove, reason="Carrier promotion")
-                        await target.add_roles(new_role, reason="Carrier promotion via /promote")
-                        results.append(f"🛡️ Promoted to **{role_name}** (Carrier track)")
-                break  # Stop at the first (highest) tier they qualify for
+        promo_msg, progress_msg = await evaluate_ladder(
+            CARRIER_LADDER, carries, vouches, "Carries", "Vouches", "Carrier", "🛡️"
+        )
+        if promo_msg:
+            results.append(promo_msg)
+        else:
+            progress_lines.append(progress_msg)
 
     # ----- Support track: only applies if they already have the base Support role -----
     base_support_role = guild.get_role(BASE_SUPPORT_ROLE_ID)
     if base_support_role and base_support_role in target.roles:
-        ladder_role_ids = {role_id for role_id, _, _, _ in SUPPORT_LADDER}
-        current_role_ids = {r.id for r in target.roles if r.id in ladder_role_ids}
-
-        for role_id, role_name, support_req, vouches_req in SUPPORT_LADDER:
-            if support_vouches >= support_req and vouches >= vouches_req:
-                if role_id not in current_role_ids:
-                    new_role = guild.get_role(role_id)
-                    if new_role:
-                        roles_to_remove = [guild.get_role(rid) for rid in current_role_ids if rid != role_id]
-                        roles_to_remove = [r for r in roles_to_remove if r]
-                        if roles_to_remove:
-                            await target.remove_roles(*roles_to_remove, reason="Support promotion")
-                        await target.add_roles(new_role, reason="Support promotion via /promote")
-                        results.append(f"❤️ Promoted to **{role_name}** (Support track)")
-                break
+        promo_msg, progress_msg = await evaluate_ladder(
+            SUPPORT_LADDER, support_vouches, vouches, "Support Vouches", "Vouches", "Support", "❤️"
+        )
+        if promo_msg:
+            results.append(promo_msg)
+        else:
+            progress_lines.append(progress_msg)
 
     stats_line = f"Carries: **{carries}** | Vouches: **{vouches}** | Support Vouches: **{support_vouches}**"
 
+    message_parts = []
     if results:
-        message = "\n".join(results) + f"\n\n{stats_line}"
-    else:
-        message = f"No new promotions right now.\n\n{stats_line}"
+        message_parts.extend(results)
+    if progress_lines:
+        message_parts.extend(progress_lines)
+    if not message_parts:
+        message_parts.append("No carrier or support track applies to you yet.")
+
+    message = "\n".join(message_parts) + f"\n\n{stats_line}"
 
     await interaction.followup.send(message, ephemeral=True)
 

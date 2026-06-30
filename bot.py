@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -36,6 +37,12 @@ CARRY_LOG_CHANNEL_ID = 1521356371482906675
 # ----- Drag system config -----
 DRAG_SOURCE_CHANNEL_ID = 1521341265793388677
 
+# ----- Ticket system config -----
+OWNER_ID = 1290758651652603995
+OVERSEER_ROLE_ID = 1521357864793280512
+
+TICKET_TYPES = ["Carry Ticket", "Support Ticket", "Ally Ticket"]
+
 # ----- Vouch system config -----
 VOUCH_CHANNEL_ID = 1521340189857939497
 VOUCH_COOLDOWN_SECONDS = 60
@@ -70,15 +77,147 @@ def format_duration(seconds):
     return " ".join(parts)
 
 
+def is_overseer_or_above(member: discord.Member) -> bool:
+    """True if the member has the Overseer role, or any role positioned higher than it."""
+    overseer_role = member.guild.get_role(OVERSEER_ROLE_ID)
+    if overseer_role is None:
+        return False
+    if overseer_role in member.roles:
+        return True
+    return member.top_role.position > overseer_role.position
+
+
+async def create_ticket_channel(interaction: discord.Interaction, ticket_type: str):
+    guild = interaction.guild
+    category = interaction.channel.category  # Create the ticket in the same category as the panel
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True),
+    }
+
+    overseer_role = guild.get_role(OVERSEER_ROLE_ID)
+    if overseer_role:
+        # Grant access to Overseer and every role positioned above it
+        for role in guild.roles:
+            if role.position >= overseer_role.position and role != guild.default_role:
+                overwrites[role] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True, read_message_history=True
+                )
+
+    channel_name = f"{interaction.user.name}| {ticket_type}"
+
+    channel = await guild.create_text_channel(
+        name=channel_name,
+        category=category,
+        overwrites=overwrites,
+        reason=f"Ticket opened by {interaction.user} ({interaction.user.id})",
+    )
+
+    embed = discord.Embed(
+        title=f"🎫 {ticket_type}",
+        description=(
+            f"Thanks for opening a ticket, {interaction.user.mention}!\n"
+            f"Someone with the Overseer role (or higher) will be with you shortly.\n\n"
+            f"Please describe what you need help with below."
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"Ticket owner: {interaction.user.id}")
+
+    await channel.send(content=interaction.user.mention, embed=embed, view=TicketControlView())
+
+    return channel
+
+
+class TicketPanelView(discord.ui.View):
+    """The persistent panel with the 3 ticket-type buttons. Posted once via /createticketsystem."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Carry Ticket", style=discord.ButtonStyle.primary, custom_id="ticket_panel_carry")
+    async def carry_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        channel = await create_ticket_channel(interaction, "Carry Ticket")
+        await interaction.followup.send(f"Your ticket has been created: {channel.mention}", ephemeral=True)
+
+    @discord.ui.button(label="Support Ticket", style=discord.ButtonStyle.secondary, custom_id="ticket_panel_support")
+    async def support_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        channel = await create_ticket_channel(interaction, "Support Ticket")
+        await interaction.followup.send(f"Your ticket has been created: {channel.mention}", ephemeral=True)
+
+    @discord.ui.button(label="Ally Ticket", style=discord.ButtonStyle.success, custom_id="ticket_panel_ally")
+    async def ally_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        channel = await create_ticket_channel(interaction, "Ally Ticket")
+        await interaction.followup.send(f"Your ticket has been created: {channel.mention}", ephemeral=True)
+
+
+class TicketControlView(discord.ui.View):
+    """Persistent Close/Claim buttons posted inside each ticket channel."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.secondary, custom_id="ticket_control_claim")
+    async def claim_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_overseer_or_above(interaction.user):
+            await interaction.response.send_message(
+                "Only Overseers (or higher) can claim tickets.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            f"🙋 {interaction.user.mention} has claimed this ticket."
+        )
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, custom_id="ticket_control_close")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_overseer_or_above(interaction.user):
+            await interaction.response.send_message(
+                "Only Overseers (or higher) can close tickets.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            "🔒 Closing this ticket in 5 seconds..."
+        )
+        await asyncio.sleep(5)
+        await interaction.channel.delete(reason=f"Ticket closed by {interaction.user}")
+
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketControlView())
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s).")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
     print("Bot is online and ready!")
+
+
+@bot.tree.command(name="createticketsystem", description="Post the ticket panel in this channel. Owner only.")
+async def createticketsystem(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message(
+            "Only the server owner can use this command.", ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title="🎫 Apply for roles here.",
+        description="Click a button below to open a ticket for the relevant team.",
+        color=discord.Color.blurple(),
+    )
+
+    await interaction.channel.send(embed=embed, view=TicketPanelView())
+    await interaction.response.send_message("Ticket panel posted!", ephemeral=True)
 
 
 @bot.tree.command(name="startcarry", description="Start a carry and announce it in the carry channel.")

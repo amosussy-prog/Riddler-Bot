@@ -92,6 +92,51 @@ def is_overseer_or_above(member: discord.Member) -> bool:
     return member.top_role.position > overseer_role.position
 
 
+async def count_marked_messages(channel_id: int, target_id: int, color: discord.Color) -> int:
+    """Counts bot-sent embeds in a channel whose footer matches target_id and whose
+    color matches the given marker color. Shared by vouches/carries/support-vouches/promote."""
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        return 0
+
+    target_marker = str(target_id)
+    count = 0
+    async for message in channel.history(limit=None):
+        if message.author.id != bot.user.id:
+            continue
+        for embed in message.embeds:
+            footer_text = embed.footer.text if embed.footer else ""
+            if footer_text == target_marker and embed.color == color:
+                count += 1
+    return count
+
+
+# ----- Promotion system config -----
+BASE_SUPPORT_ROLE_ID = 1521355590993973308
+
+# Each entry: (role_id, role_name, carries_required, vouches_required)
+# Ordered from highest rank to lowest. Trial Carrier has no requirements (starting role).
+CARRIER_LADDER = [
+    (1521358275453386793, "Drowned God", 100, 1000),
+    (1521357864793280512, "Overseer", 75, 800),
+    (1521357464866525244, "Godly Carrier", 50, 650),
+    (1521357362655399941, "Advanced Carrier", 30, 400),
+    (1521357135404073191, "Experienced Carrier", 10, 150),
+    (1521356147054088252, "Apprentice Carrier", 3, 50),
+    (1521355970884931664, "Trial Carrier", 0, 0),
+]
+
+# Each entry: (role_id, role_name, support_vouches_required, vouches_required)
+SUPPORT_LADDER = [
+    (1521358753469825126, "Celestial of Support", 100, 750),
+    (1521358650533478461, "Vowed Support", 50, 500),
+    (1521364861421092956, "Advanced Support", 30, 350),
+    (1521358581054574683, "Experienced Support", 15, 250),
+    (1521358496397000734, "Apprentice Support", 5, 100),
+    (1521356092632862725, "Trial Support", 0, 0),
+]
+
+
 TICKET_INSTRUCTIONS = {
     "Ally Ticket": (
         "Send the following information to become an ally.\n\n"
@@ -491,20 +536,7 @@ async def viewvouches(interaction: discord.Interaction, user: discord.User = Non
 
     await interaction.response.defer(ephemeral=True)
 
-    target_marker = str(target.id)
-    count = 0
-
-    # Scan the vouch channel's history, but ONLY count messages sent by this bot.
-    # We also check the embed color matches our vouch embeds, so we don't
-    # accidentally match some other unrelated bot embed that happens to have
-    # the same number in its footer.
-    async for message in channel.history(limit=None):
-        if message.author.id != bot.user.id:
-            continue
-        for embed in message.embeds:
-            footer_text = embed.footer.text if embed.footer else ""
-            if footer_text == target_marker and embed.color == discord.Color.green():
-                count += 1
+    count = await count_marked_messages(VOUCH_CHANNEL_ID, target.id, discord.Color.green())
 
     await interaction.followup.send(
         f"{target.mention} has **{count}** {pluralize_vouch(count)}.", ephemeral=True
@@ -573,20 +605,74 @@ async def viewsupportvouches(interaction: discord.Interaction, user: discord.Use
 
     await interaction.response.defer(ephemeral=True)
 
-    target_marker = str(target.id)
-    count = 0
-
-    async for message in channel.history(limit=None):
-        if message.author.id != bot.user.id:
-            continue
-        for embed in message.embeds:
-            footer_text = embed.footer.text if embed.footer else ""
-            if footer_text == target_marker and embed.color == discord.Color.gold():
-                count += 1
+    count = await count_marked_messages(VOUCH_CHANNEL_ID, target.id, discord.Color.gold())
 
     await interaction.followup.send(
         f"{target.mention} has **{count}** support {pluralize_vouch(count)}.", ephemeral=True
     )
+
+
+@bot.tree.command(name="promote", description="Check your stats and get promoted if you qualify.")
+@app_commands.describe(user="Promote a specific user instead of yourself (staff use)")
+async def promote(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    guild = interaction.guild
+
+    await interaction.response.defer(ephemeral=True)
+
+    vouches = await count_marked_messages(VOUCH_CHANNEL_ID, target.id, discord.Color.green())
+    carries = await count_marked_messages(CARRY_LOG_CHANNEL_ID, target.id, discord.Color.orange())
+    support_vouches = await count_marked_messages(VOUCH_CHANNEL_ID, target.id, discord.Color.gold())
+
+    results = []
+
+    # ----- Carrier track: only applies if they already have the base Carrier role -----
+    carrier_role = guild.get_role(CARRIER_ROLE_ID)
+    if carrier_role and carrier_role in target.roles:
+        ladder_role_ids = {role_id for role_id, _, _, _ in CARRIER_LADDER}
+        current_role_ids = {r.id for r in target.roles if r.id in ladder_role_ids}
+
+        # Find the highest tier they qualify for (list is ordered highest -> lowest)
+        for role_id, role_name, carries_req, vouches_req in CARRIER_LADDER:
+            if carries >= carries_req and vouches >= vouches_req:
+                if role_id not in current_role_ids:
+                    new_role = guild.get_role(role_id)
+                    if new_role:
+                        roles_to_remove = [guild.get_role(rid) for rid in current_role_ids if rid != role_id]
+                        roles_to_remove = [r for r in roles_to_remove if r]
+                        if roles_to_remove:
+                            await target.remove_roles(*roles_to_remove, reason="Carrier promotion")
+                        await target.add_roles(new_role, reason="Carrier promotion via /promote")
+                        results.append(f"🛡️ Promoted to **{role_name}** (Carrier track)")
+                break  # Stop at the first (highest) tier they qualify for
+
+    # ----- Support track: only applies if they already have the base Support role -----
+    base_support_role = guild.get_role(BASE_SUPPORT_ROLE_ID)
+    if base_support_role and base_support_role in target.roles:
+        ladder_role_ids = {role_id for role_id, _, _, _ in SUPPORT_LADDER}
+        current_role_ids = {r.id for r in target.roles if r.id in ladder_role_ids}
+
+        for role_id, role_name, support_req, vouches_req in SUPPORT_LADDER:
+            if support_vouches >= support_req and vouches >= vouches_req:
+                if role_id not in current_role_ids:
+                    new_role = guild.get_role(role_id)
+                    if new_role:
+                        roles_to_remove = [guild.get_role(rid) for rid in current_role_ids if rid != role_id]
+                        roles_to_remove = [r for r in roles_to_remove if r]
+                        if roles_to_remove:
+                            await target.remove_roles(*roles_to_remove, reason="Support promotion")
+                        await target.add_roles(new_role, reason="Support promotion via /promote")
+                        results.append(f"❤️ Promoted to **{role_name}** (Support track)")
+                break
+
+    stats_line = f"Carries: **{carries}** | Vouches: **{vouches}** | Support Vouches: **{support_vouches}**"
+
+    if results:
+        message = "\n".join(results) + f"\n\n{stats_line}"
+    else:
+        message = f"No new promotions right now.\n\n{stats_line}"
+
+    await interaction.followup.send(message, ephemeral=True)
 
 
 @bot.tree.command(name="viewcarries", description="Check how many carries a carrier has logged.")
@@ -604,18 +690,7 @@ async def viewcarries(interaction: discord.Interaction, user: discord.User = Non
 
     await interaction.response.defer(ephemeral=True)
 
-    target_marker = str(target.id)
-    count = 0
-
-    # Same approach as /viewvouches: scan the log channel's history, only
-    # counting messages sent by this bot, matched on the embed footer + color.
-    async for message in channel.history(limit=None):
-        if message.author.id != bot.user.id:
-            continue
-        for embed in message.embeds:
-            footer_text = embed.footer.text if embed.footer else ""
-            if footer_text == target_marker and embed.color == discord.Color.orange():
-                count += 1
+    count = await count_marked_messages(CARRY_LOG_CHANNEL_ID, target.id, discord.Color.orange())
 
     await interaction.followup.send(
         f"{target.mention} has logged **{count}** {pluralize_carry(count)}.", ephemeral=True

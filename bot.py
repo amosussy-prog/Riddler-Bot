@@ -53,6 +53,11 @@ VOUCH_TAG = "VOUCHRECORD"
 # Tracks last time each user used /vouch successfully: {user_id: timestamp}
 vouch_cooldowns = {}
 
+SUPPORT_VOUCH_COOLDOWN_SECONDS = 600  # 10 minutes
+
+# Tracks last time each carrier used /supportvouch successfully: {user_id: timestamp}
+support_vouch_cooldowns = {}
+
 
 def pluralize_vouch(count):
     """Returns 'vouch' for 1, 'vouches' for anything else."""
@@ -87,6 +92,29 @@ def is_overseer_or_above(member: discord.Member) -> bool:
     return member.top_role.position > overseer_role.position
 
 
+TICKET_INSTRUCTIONS = {
+    "Ally Ticket": (
+        "Send the following information to become an ally.\n\n"
+        "* Guild\n"
+        "* Members\n"
+        "* Why do you want to be an ally?\n\n"
+        "And an owner will be with you shortly."
+    ),
+    "Carry Ticket": (
+        "Send evidence of you defeating the following without going below 60% health:\n\n"
+        "* Enmity\n"
+        "* Elder Primadon\n"
+        "* Titus\n"
+        "* Kyrsgarde Champion\n\n"
+        "And an overseer will be with you shortly."
+    ),
+    "Support Ticket": (
+        "Send evidence of supporting a carrier or ping the carrier you supported to vouch for you, "
+        "and an overseer will be with you shortly."
+    ),
+}
+
+
 async def create_ticket_channel(interaction: discord.Interaction, ticket_type: str):
     guild = interaction.guild
     category = interaction.channel.category  # Create the ticket in the same category as the panel
@@ -117,11 +145,7 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
 
     embed = discord.Embed(
         title=f"🎫 {ticket_type}",
-        description=(
-            f"Thanks for opening a ticket, {interaction.user.mention}!\n"
-            f"Someone with the Overseer role (or higher) will be with you shortly.\n\n"
-            f"Please describe what you need help with below."
-        ),
+        description=TICKET_INSTRUCTIONS.get(ticket_type, "Please describe what you need help with below."),
         color=discord.Color.blurple(),
     )
     embed.set_footer(text=f"Ticket owner: {interaction.user.id}")
@@ -484,6 +508,84 @@ async def viewvouches(interaction: discord.Interaction, user: discord.User = Non
 
     await interaction.followup.send(
         f"{target.mention} has **{count}** {pluralize_vouch(count)}.", ephemeral=True
+    )
+
+
+@bot.tree.command(name="supportvouch", description="Carrier-only: give a support vouch in the vouch channel.")
+@app_commands.describe(who_to_vouch="The user you want to give a support vouch to")
+async def supportvouch(interaction: discord.Interaction, who_to_vouch: discord.User):
+    if not has_carrier_role(interaction.user):
+        await interaction.response.send_message(
+            "Only carriers can use /supportvouch.", ephemeral=True
+        )
+        return
+
+    if interaction.channel_id != VOUCH_CHANNEL_ID:
+        channel = bot.get_channel(VOUCH_CHANNEL_ID)
+        location = channel.mention if channel else "the vouch channel"
+        await interaction.response.send_message(
+            f"You can only use /supportvouch in {location}.", ephemeral=True
+        )
+        return
+
+    # 10-minute cooldown, separate from the regular /vouch cooldown
+    now = time.time()
+    last_used = support_vouch_cooldowns.get(interaction.user.id)
+    if last_used and (now - last_used) < SUPPORT_VOUCH_COOLDOWN_SECONDS:
+        remaining = int(SUPPORT_VOUCH_COOLDOWN_SECONDS - (now - last_used))
+        minutes, seconds = divmod(remaining, 60)
+        await interaction.response.send_message(
+            f"You're on cooldown. Try again in {minutes}m {seconds}s.", ephemeral=True
+        )
+        return
+
+    if who_to_vouch.id == interaction.user.id:
+        await interaction.response.send_message(
+            "You can't vouch for yourself.", ephemeral=True
+        )
+        return
+
+    support_vouch_cooldowns[interaction.user.id] = now
+
+    # Same pattern as /vouch, but with a distinct color (gold) so it's
+    # tracked separately by /viewsupportvouches.
+    embed = discord.Embed(
+        description=f"⭐ {interaction.user.mention} gave a **support vouch** to {who_to_vouch.mention}!",
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=str(who_to_vouch.id))
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="viewsupportvouches", description="Check how many support vouches someone has.")
+@app_commands.describe(user="The user to check (leave empty to check yourself)")
+async def viewsupportvouches(interaction: discord.Interaction, user: discord.User = None):
+    target = user or interaction.user
+
+    channel = bot.get_channel(VOUCH_CHANNEL_ID)
+    if channel is None:
+        await interaction.response.send_message(
+            "Couldn't find the vouch channel. Check the channel ID in the bot config.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    target_marker = str(target.id)
+    count = 0
+
+    async for message in channel.history(limit=None):
+        if message.author.id != bot.user.id:
+            continue
+        for embed in message.embeds:
+            footer_text = embed.footer.text if embed.footer else ""
+            if footer_text == target_marker and embed.color == discord.Color.gold():
+                count += 1
+
+    await interaction.followup.send(
+        f"{target.mention} has **{count}** support {pluralize_vouch(count)}.", ephemeral=True
     )
 
 

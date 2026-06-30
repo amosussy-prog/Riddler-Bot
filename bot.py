@@ -613,20 +613,19 @@ async def viewsupportvouches(interaction: discord.Interaction, user: discord.Use
 
 
 @bot.tree.command(name="promote", description="Check your stats and get promoted if you qualify.")
-@app_commands.describe(user="Promote a specific user instead of yourself (staff use)")
-async def promote(interaction: discord.Interaction, user: discord.Member = None):
-    target = user or interaction.user
+async def promote(interaction: discord.Interaction):
+    target = interaction.user
     guild = interaction.guild
 
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     vouches = await count_marked_messages(VOUCH_CHANNEL_ID, target.id, discord.Color.green())
     carries = await count_marked_messages(CARRY_LOG_CHANNEL_ID, target.id, discord.Color.orange())
     support_vouches = await count_marked_messages(VOUCH_CHANNEL_ID, target.id, discord.Color.gold())
 
-    async def evaluate_ladder(ladder, value1, value2, label1, label2, track_label, emoji):
+    async def evaluate_ladder(ladder, value1, value2, label1, label2, track_label):
         """Finds the highest tier the user qualifies for, promotes them if it's new,
-        and returns (promotion_message_or_None, progress_message)."""
+        and returns (promoted_role_name_or_None, field_name, field_value)."""
         ladder_role_ids = {role_id for role_id, _, _, _ in ladder}
         current_role_ids = {r.id for r in target.roles if r.id in ladder_role_ids}
 
@@ -638,7 +637,7 @@ async def promote(interaction: discord.Interaction, user: discord.Member = None)
 
         role_id, role_name, req1, req2 = ladder[qualifying_index]
 
-        promotion_message = None
+        promoted_role_name = None
         if role_id not in current_role_ids:
             new_role = guild.get_role(role_id)
             if new_role:
@@ -647,58 +646,48 @@ async def promote(interaction: discord.Interaction, user: discord.Member = None)
                 if roles_to_remove:
                     await target.remove_roles(*roles_to_remove, reason=f"{track_label} promotion")
                 await target.add_roles(new_role, reason=f"{track_label} promotion via /promote")
-                promotion_message = f"{emoji} Promoted to **{role_name}** ({track_label} track)"
+                promoted_role_name = role_name
 
-        # Progress toward the next tier up (the entry just before this one in the list)
+        # Stat line only shows the two stats relevant to this track
+        stat_value_line = f"{label1}: **{value1}**/**{req1 if qualifying_index == 0 else ladder[qualifying_index - 1][2]}** | {label2}: **{value2}**/**{req2 if qualifying_index == 0 else ladder[qualifying_index - 1][3]}**"
+
         if qualifying_index == 0:
-            progress_message = f"{emoji} {track_label}: already at the top rank (**{role_name}**)."
+            field_name = f"{track_label} | Max Rank Reached: {role_name}"
         else:
-            _, next_name, next_req1, next_req2 = ladder[qualifying_index - 1]
-            progress_message = (
-                f"{emoji} {track_label}: next rank is **{next_name}** — "
-                f"{label1}: {value1}/{next_req1}, {label2}: {value2}/{next_req2}"
-            )
+            next_name = ladder[qualifying_index - 1][1]
+            field_name = f"{track_label} | Next Rank Is {next_name}"
 
-        return promotion_message, progress_message
+        return promoted_role_name, field_name, stat_value_line
 
-    results = []
-    progress_lines = []
+    embed = discord.Embed(title=f"📊 Promotion Status — {target.display_name}", color=discord.Color.blurple())
+    promotions = []
 
     # ----- Carrier track: only applies if they already have the base Carrier role -----
     carrier_role = guild.get_role(CARRIER_ROLE_ID)
     if carrier_role and carrier_role in target.roles:
-        promo_msg, progress_msg = await evaluate_ladder(
-            CARRIER_LADDER, carries, vouches, "Carries", "Vouches", "Carrier", "🛡️"
+        promoted_role_name, field_name, field_value = await evaluate_ladder(
+            CARRIER_LADDER, carries, vouches, "Carries", "Vouches", "Carrier"
         )
-        if promo_msg:
-            results.append(promo_msg)
-        else:
-            progress_lines.append(progress_msg)
+        embed.add_field(name=field_name, value=field_value, inline=False)
+        if promoted_role_name:
+            promotions.append(f"🛡️ Promoted to **{promoted_role_name}**!")
 
     # ----- Support track: only applies if they already have the base Support role -----
     base_support_role = guild.get_role(BASE_SUPPORT_ROLE_ID)
     if base_support_role and base_support_role in target.roles:
-        promo_msg, progress_msg = await evaluate_ladder(
-            SUPPORT_LADDER, support_vouches, vouches, "Support Vouches", "Vouches", "Support", "❤️"
+        promoted_role_name, field_name, field_value = await evaluate_ladder(
+            SUPPORT_LADDER, support_vouches, vouches, "Support Vouches", "Vouches", "Support"
         )
-        if promo_msg:
-            results.append(promo_msg)
-        else:
-            progress_lines.append(progress_msg)
+        embed.add_field(name=field_name, value=field_value, inline=False)
+        if promoted_role_name:
+            promotions.append(f"❤️ Promoted to **{promoted_role_name}**!")
 
-    stats_line = f"Carries: **{carries}** | Vouches: **{vouches}** | Support Vouches: **{support_vouches}**"
+    if not embed.fields:
+        embed.description = "No carrier or support track applies to you yet."
+    elif promotions:
+        embed.description = "\n".join(promotions)
 
-    message_parts = []
-    if results:
-        message_parts.extend(results)
-    if progress_lines:
-        message_parts.extend(progress_lines)
-    if not message_parts:
-        message_parts.append("No carrier or support track applies to you yet.")
-
-    message = "\n".join(message_parts) + f"\n\n{stats_line}"
-
-    await interaction.followup.send(message, ephemeral=True)
+    await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="viewcarries", description="Check how many carries a carrier has logged.")

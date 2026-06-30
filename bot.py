@@ -33,12 +33,17 @@ active_carries = {}
 # ----- Vouch system config -----
 VOUCH_CHANNEL_ID = 1521340189857939497
 VOUCH_COOLDOWN_SECONDS = 60
-
-# Tracks vouch counts: {user_id: count}
-vouch_counts = {}
+# This tag is embedded (invisibly, via a hidden marker) in every vouch message
+# the bot sends, so /viewvouches can find and count them later.
+VOUCH_TAG = "VOUCHRECORD"
 
 # Tracks last time each user used /vouch successfully: {user_id: timestamp}
 vouch_cooldowns = {}
+
+
+def pluralize_vouch(count):
+    """Returns 'vouch' for 1, 'vouches' for anything else."""
+    return "vouch" if count == 1 else "vouches"
 
 
 @bot.event
@@ -148,22 +153,51 @@ async def vouch(interaction: discord.Interaction, who_to_vouch: discord.User):
         )
         return
 
-    vouch_counts[who_to_vouch.id] = vouch_counts.get(who_to_vouch.id, 0) + 1
     vouch_cooldowns[interaction.user.id] = now
 
-    await interaction.response.send_message(
-        f"{interaction.user.mention} vouched for {who_to_vouch.mention}! "
-        f"They now have **{vouch_counts[who_to_vouch.id]}** vouch(es)."
+    # Send the actual vouch record into the channel. The hidden VOUCH_TAG/target marker
+    # is what /viewvouches looks for later to count vouches — it's invisible to users
+    # since it's tucked into the embed footer.
+    embed = discord.Embed(
+        description=f"✅ {interaction.user.mention} vouched for {who_to_vouch.mention}!",
+        color=discord.Color.green(),
     )
+    embed.set_footer(text=f"{VOUCH_TAG}|target:{who_to_vouch.id}|by:{interaction.user.id}")
+
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="viewvouches", description="Check how many vouches someone has.")
 @app_commands.describe(user="The user to check (leave empty to check yourself)")
 async def viewvouches(interaction: discord.Interaction, user: discord.User = None):
     target = user or interaction.user
-    count = vouch_counts.get(target.id, 0)
-    await interaction.response.send_message(
-        f"{target.mention} has **{count}** vouch(es).", ephemeral=True
+
+    channel = bot.get_channel(VOUCH_CHANNEL_ID)
+    if channel is None:
+        await interaction.response.send_message(
+            "Couldn't find the vouch channel. Check the channel ID in the bot config.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    target_marker = f"target:{target.id}|"
+    count = 0
+
+    # Scan the vouch channel's history, but ONLY count messages sent by this bot.
+    # Messages from any other user (even if they happen to contain similar text)
+    # are ignored entirely.
+    async for message in channel.history(limit=None):
+        if message.author.id != bot.user.id:
+            continue
+        for embed in message.embeds:
+            footer_text = embed.footer.text if embed.footer else ""
+            if VOUCH_TAG in footer_text and target_marker in footer_text:
+                count += 1
+
+    await interaction.followup.send(
+        f"{target.mention} has **{count}** {pluralize_vouch(count)}.", ephemeral=True
     )
 
 

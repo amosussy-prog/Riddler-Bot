@@ -137,6 +137,14 @@ SUPPORT_LADDER = [
 ]
 
 
+def get_current_rank_name(member: discord.Member, ladder):
+    """Returns the name of the highest tier in the ladder that this member currently holds, or None."""
+    for role_id, role_name, _, _ in ladder:
+        if any(r.id == role_id for r in member.roles):
+            return role_name
+    return None
+
+
 TICKET_INSTRUCTIONS = {
     "Ally Ticket": (
         "Send the following information to become an ally.\n\n"
@@ -711,6 +719,94 @@ async def viewcarries(interaction: discord.Interaction, user: discord.User = Non
         f"{target.mention} has logged **{count}** {pluralize_carry(count)}.", ephemeral=True
     )
 
+
+@bot.tree.command(name="stats", description="View your stats, or someone else's, including current rank.")
+@app_commands.describe(user="The user to check (leave empty to check yourself)")
+async def stats(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+
+    await interaction.response.defer()
+
+    vouches = await count_marked_messages(VOUCH_CHANNEL_ID, target.id, discord.Color.green())
+    carries = await count_marked_messages(CARRY_LOG_CHANNEL_ID, target.id, discord.Color.orange())
+    support_vouches = await count_marked_messages(VOUCH_CHANNEL_ID, target.id, discord.Color.gold())
+
+    carrier_rank = get_current_rank_name(target, CARRIER_LADDER)
+    support_rank = get_current_rank_name(target, SUPPORT_LADDER)
+
+    embed = discord.Embed(
+        title=f"📊 Stats — {target.display_name}",
+        color=discord.Color.blurple(),
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+
+    embed.add_field(name="🛡️ Carries", value=f"**{carries}**", inline=True)
+    embed.add_field(name="✅ Vouches", value=f"**{vouches}**", inline=True)
+    embed.add_field(name="⭐ Support Vouches", value=f"**{support_vouches}**", inline=True)
+
+    embed.add_field(name="Carrier Rank", value=carrier_rank or "*None*", inline=True)
+    embed.add_field(name="Support Rank", value=support_rank or "*None*", inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer for clean 3-column layout
+
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="help", description="See a list of all commands this bot offers.")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📖 Bot Commands",
+        description="Here's everything this bot can do, grouped by category.",
+        color=discord.Color.blurple(),
+    )
+
+    embed.add_field(
+        name="🛡️ Carries",
+        value=(
+            "`/startcarry` — Start a carry and announce it (Carrier role required)\n"
+            "`/endcarry` — End your active carry and log its duration\n"
+            "`/viewcarries [user]` — Check how many carries someone has logged"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="✅ Vouches",
+        value=(
+            "`/vouch <user>` — Vouch for someone (vouch channel only, 1 min cooldown)\n"
+            "`/viewvouches [user]` — Check how many vouches someone has\n"
+            "`/supportvouch <user>` — Carrier-only support vouch (10 min cooldown)\n"
+            "`/viewsupportvouches [user]` — Check how many support vouches someone has"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="📈 Ranks & Stats",
+        value=(
+            "`/promote` — Check if you qualify for a rank promotion (auto-promotes you)\n"
+            "`/stats [user]` — View carries, vouches, support vouches, and current rank"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="🚚 Voice Tools",
+        value=(
+            "`/drag <user>` — Pull a user from the drag channel into your voice/stage channel (Carrier only)\n"
+            "`/massdrag` — Pull everyone from the drag channel into your voice/stage channel (Carrier only)"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="🎫 Tickets",
+        value="`/createticketsystem` — Post the ticket panel (Owner only)",
+        inline=False,
+    )
+
+    embed.set_footer(text="Brackets [ ] mean optional. <> means required.")
+
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.command()

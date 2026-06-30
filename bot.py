@@ -13,6 +13,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -29,6 +30,9 @@ CARRY_TYPE_ROLES = {
 
 # Tracks which carriers currently have an active carry: {user_id: True}
 active_carries = {}
+
+# ----- Drag system config -----
+DRAG_SOURCE_CHANNEL_ID = 1521341265793388677
 
 # ----- Vouch system config -----
 VOUCH_CHANNEL_ID = 1521340189857939497
@@ -122,6 +126,111 @@ async def endcarry(interaction: discord.Interaction):
 
     active_carries.pop(interaction.user.id, None)
     await interaction.response.send_message("Ended")
+
+
+def has_carrier_role(member: discord.Member) -> bool:
+    role = discord.utils.get(member.roles, id=CARRIER_ROLE_ID)
+    return role is not None
+
+
+@bot.tree.command(name="drag", description="Pull someone from the drag channel into your voice/stage channel.")
+@app_commands.describe(who_to_drag="The user to drag (must be in the drag-from channel)")
+async def drag(interaction: discord.Interaction, who_to_drag: discord.Member):
+    if not has_carrier_role(interaction.user):
+        await interaction.response.send_message(
+            "You need the Carrier role to use this command.", ephemeral=True
+        )
+        return
+
+    # The carrier must themselves be in a voice/stage channel to drag someone to it
+    if interaction.user.voice is None or interaction.user.voice.channel is None:
+        await interaction.response.send_message(
+            "You need to be in a voice or stage channel to drag someone to it.",
+            ephemeral=True,
+        )
+        return
+
+    destination = interaction.user.voice.channel
+
+    # Only allow dragging users who are actually connected to the designated channel
+    if (
+        who_to_drag.voice is None
+        or who_to_drag.voice.channel is None
+        or who_to_drag.voice.channel.id != DRAG_SOURCE_CHANNEL_ID
+    ):
+        await interaction.response.send_message(
+            f"{who_to_drag.mention} isn't connected to the drag-from channel.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await who_to_drag.move_to(destination)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "I don't have permission to move that member. Check my role permissions.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(
+            f"Something went wrong while dragging that user: {e}", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"Dragged {who_to_drag.mention} into {destination.mention}.", ephemeral=True
+    )
+
+
+@bot.tree.command(name="massdrag", description="Pull everyone from the drag channel into your voice/stage channel.")
+async def massdrag(interaction: discord.Interaction):
+    if not has_carrier_role(interaction.user):
+        await interaction.response.send_message(
+            "You need the Carrier role to use this command.", ephemeral=True
+        )
+        return
+
+    if interaction.user.voice is None or interaction.user.voice.channel is None:
+        await interaction.response.send_message(
+            "You need to be in a voice or stage channel to drag people to it.",
+            ephemeral=True,
+        )
+        return
+
+    destination = interaction.user.voice.channel
+
+    source_channel = interaction.guild.get_channel(DRAG_SOURCE_CHANNEL_ID)
+    if source_channel is None:
+        await interaction.response.send_message(
+            "Couldn't find the drag-from channel. Check the channel ID in the bot config.",
+            ephemeral=True,
+        )
+        return
+
+    members_to_drag = list(source_channel.members)
+    if not members_to_drag:
+        await interaction.response.send_message(
+            "There's no one in the drag-from channel right now.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    dragged = 0
+    failed = 0
+    for member in members_to_drag:
+        try:
+            await member.move_to(destination)
+            dragged += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    summary = f"Dragged {dragged} member(s) into {destination.mention}."
+    if failed:
+        summary += f" Failed to move {failed} member(s)."
+
+    await interaction.followup.send(summary, ephemeral=True)
 
 
 @bot.tree.command(name="vouch", description="Vouch for someone in the vouch channel.")

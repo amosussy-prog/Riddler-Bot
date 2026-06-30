@@ -1,4 +1,5 @@
 import os
+import time
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -28,6 +29,16 @@ CARRY_TYPE_ROLES = {
 
 # Tracks which carriers currently have an active carry: {user_id: True}
 active_carries = {}
+
+# ----- Vouch system config -----
+VOUCH_CHANNEL_ID = 1521340189857939497
+VOUCH_COOLDOWN_SECONDS = 60
+
+# Tracks vouch counts: {user_id: count}
+vouch_counts = {}
+
+# Tracks last time each user used /vouch successfully: {user_id: timestamp}
+vouch_cooldowns = {}
 
 
 @bot.event
@@ -106,6 +117,55 @@ async def endcarry(interaction: discord.Interaction):
 
     active_carries.pop(interaction.user.id, None)
     await interaction.response.send_message("Ended")
+
+
+@bot.tree.command(name="vouch", description="Vouch for someone in the vouch channel.")
+@app_commands.describe(who_to_vouch="The user you want to vouch for")
+async def vouch(interaction: discord.Interaction, who_to_vouch: discord.User):
+    # Restrict this command to the designated vouch channel only.
+    # Using it outside that channel does NOT count against the cooldown.
+    if interaction.channel_id != VOUCH_CHANNEL_ID:
+        channel = bot.get_channel(VOUCH_CHANNEL_ID)
+        location = channel.mention if channel else "the vouch channel"
+        await interaction.response.send_message(
+            f"You can only use /vouch in {location}.", ephemeral=True
+        )
+        return
+
+    # Check the 1-minute cooldown (per user, only applies when used in the right channel)
+    now = time.time()
+    last_used = vouch_cooldowns.get(interaction.user.id)
+    if last_used and (now - last_used) < VOUCH_COOLDOWN_SECONDS:
+        remaining = int(VOUCH_COOLDOWN_SECONDS - (now - last_used))
+        await interaction.response.send_message(
+            f"You're on cooldown. Try again in {remaining} second(s).", ephemeral=True
+        )
+        return
+
+    if who_to_vouch.id == interaction.user.id:
+        await interaction.response.send_message(
+            "You can't vouch for yourself.", ephemeral=True
+        )
+        return
+
+    vouch_counts[who_to_vouch.id] = vouch_counts.get(who_to_vouch.id, 0) + 1
+    vouch_cooldowns[interaction.user.id] = now
+
+    await interaction.response.send_message(
+        f"{interaction.user.mention} vouched for {who_to_vouch.mention}! "
+        f"They now have **{vouch_counts[who_to_vouch.id]}** vouch(es)."
+    )
+
+
+@bot.tree.command(name="viewvouches", description="Check how many vouches someone has.")
+@app_commands.describe(user="The user to check (leave empty to check yourself)")
+async def viewvouches(interaction: discord.Interaction, user: discord.User = None):
+    target = user or interaction.user
+    count = vouch_counts.get(target.id, 0)
+    await interaction.response.send_message(
+        f"{target.mention} has **{count}** vouch(es).", ephemeral=True
+    )
+
 
 
 @bot.command()

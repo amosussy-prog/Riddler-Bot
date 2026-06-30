@@ -162,7 +162,7 @@ async def vouch(interaction: discord.Interaction, who_to_vouch: discord.User):
         description=f"✅ {interaction.user.mention} vouched for {who_to_vouch.mention}!",
         color=discord.Color.green(),
     )
-    embed.set_footer(text=f"{VOUCH_TAG}|target:{who_to_vouch.id}|by:{interaction.user.id}")
+    embed.set_footer(text=f"{VOUCH_TAG}|target:{who_to_vouch.id}")
 
     await interaction.response.send_message(embed=embed)
 
@@ -182,7 +182,7 @@ async def viewvouches(interaction: discord.Interaction, user: discord.User = Non
 
     await interaction.response.defer(ephemeral=True)
 
-    target_marker = f"target:{target.id}|"
+    target_marker = f"{VOUCH_TAG}|target:{target.id}"
     count = 0
 
     # Scan the vouch channel's history, but ONLY count messages sent by this bot.
@@ -193,7 +193,7 @@ async def viewvouches(interaction: discord.Interaction, user: discord.User = Non
             continue
         for embed in message.embeds:
             footer_text = embed.footer.text if embed.footer else ""
-            if VOUCH_TAG in footer_text and target_marker in footer_text:
+            if footer_text == target_marker:
                 count += 1
 
     await interaction.followup.send(

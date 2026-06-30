@@ -28,8 +28,10 @@ CARRY_TYPE_ROLES = {
     "Other": 1521339358450548928,
 }
 
-# Tracks which carriers currently have an active carry: {user_id: True}
+# Tracks which carriers currently have an active carry: {user_id: {"start": ts, "type": str}}
 active_carries = {}
+
+CARRY_LOG_CHANNEL_ID = 1521356371482906675
 
 # ----- Drag system config -----
 DRAG_SOURCE_CHANNEL_ID = 1521341265793388677
@@ -48,6 +50,24 @@ vouch_cooldowns = {}
 def pluralize_vouch(count):
     """Returns 'vouch' for 1, 'vouches' for anything else."""
     return "vouch" if count == 1 else "vouches"
+
+
+def pluralize_carry(count):
+    """Returns 'carry' for 1, 'carries' for anything else."""
+    return "carry" if count == 1 else "carries"
+
+
+def format_duration(seconds):
+    seconds = int(seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
 
 
 @bot.event
@@ -86,9 +106,9 @@ async def startcarry(interaction: discord.Interaction, type_of_carry: app_comman
         )
         return
 
-    active_carries[interaction.user.id] = True
-
     carry_type = type_of_carry.value
+    active_carries[interaction.user.id] = {"start": time.time(), "type": carry_type}
+
     role_id = CARRY_TYPE_ROLES.get(carry_type)
     role_mention = f"<@&{role_id}>" if role_id else ""
 
@@ -118,7 +138,8 @@ async def startcarry(interaction: discord.Interaction, type_of_carry: app_comman
 
 @bot.tree.command(name="endcarry", description="End your active carry.")
 async def endcarry(interaction: discord.Interaction):
-    if not active_carries.get(interaction.user.id):
+    carry_info = active_carries.get(interaction.user.id)
+    if not carry_info:
         await interaction.response.send_message(
             "You don't have an active carry right now.", ephemeral=True
         )
@@ -126,6 +147,22 @@ async def endcarry(interaction: discord.Interaction):
 
     active_carries.pop(interaction.user.id, None)
     await interaction.response.send_message("Ended")
+
+    duration_seconds = time.time() - carry_info["start"]
+    carry_type = carry_info["type"]
+
+    log_channel = bot.get_channel(CARRY_LOG_CHANNEL_ID)
+    if log_channel is None:
+        return  # Can't log it, but the carry has still ended for the carrier
+
+    log_embed = discord.Embed(
+        description=f"🏁 {interaction.user.mention} finished a **{carry_type}** carry.",
+        color=discord.Color.orange(),
+    )
+    log_embed.add_field(name="Duration", value=format_duration(duration_seconds), inline=True)
+    log_embed.set_footer(text=str(interaction.user.id))
+
+    await log_channel.send(embed=log_embed)
 
 
 def has_carrier_role(member: discord.Member) -> bool:
@@ -308,6 +345,39 @@ async def viewvouches(interaction: discord.Interaction, user: discord.User = Non
 
     await interaction.followup.send(
         f"{target.mention} has **{count}** {pluralize_vouch(count)}.", ephemeral=True
+    )
+
+
+@bot.tree.command(name="viewcarries", description="Check how many carries a carrier has logged.")
+@app_commands.describe(user="The carrier to check (leave empty to check yourself)")
+async def viewcarries(interaction: discord.Interaction, user: discord.User = None):
+    target = user or interaction.user
+
+    channel = bot.get_channel(CARRY_LOG_CHANNEL_ID)
+    if channel is None:
+        await interaction.response.send_message(
+            "Couldn't find the carry log channel. Check the channel ID in the bot config.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    target_marker = str(target.id)
+    count = 0
+
+    # Same approach as /viewvouches: scan the log channel's history, only
+    # counting messages sent by this bot, matched on the embed footer + color.
+    async for message in channel.history(limit=None):
+        if message.author.id != bot.user.id:
+            continue
+        for embed in message.embeds:
+            footer_text = embed.footer.text if embed.footer else ""
+            if footer_text == target_marker and embed.color == discord.Color.orange():
+                count += 1
+
+    await interaction.followup.send(
+        f"{target.mention} has logged **{count}** {pluralize_carry(count)}.", ephemeral=True
     )
 
 
